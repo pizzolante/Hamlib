@@ -1,6 +1,7 @@
 /*
 *  Hamlib rigctld backend - works with SDR#'s gpredict plugin for example
 *  Copyright (c) 2023 by Michael Black W9MDB
+*  Copyright (c) 2026 Leo Pizzolante IU7TUY, ciao@iu7tuy.it
 *
 *
 *   This library is free software; you can redistribute it and/or
@@ -31,7 +32,7 @@
 #include "iofunc.h"
 #include "misc.h"
 
-#define BACKEND_VER "20230127.0"
+#define BACKEND_VER "20260629.0"
 
 #define TRUE 1
 #define FALSE 0
@@ -46,11 +47,13 @@
 
 #define SDRSHARP_VFOS (RIG_VFO_A)
 #define SDRSHARP_ANTS (RIG_ANT_1)
-#define SDRSHARP_MODES (RIG_MODE_NONE)
+#define SDRSHARP_MODES (RIG_MODE_AM | RIG_MODE_CW | RIG_MODE_CWR | RIG_MODE_USB | RIG_MODE_LSB | RIG_MODE_FM | RIG_MODE_WFM | RIG_MODE_DSB)
 
 struct sdrsharp_priv_data
 {
     freq_t	curr_freq;
+    rmode_t	curr_mode;
+    pbwidth_t	curr_width;
 };
 
 
@@ -505,6 +508,233 @@ static int sdrsharp_set_freq(RIG *rig, vfo_t vfo, freq_t freq)
 }
 
 
+/*
+* sdrsharp_set_mode
+* Assumes rig!=NULL, STATE(rig)->priv!=NULL
+*/
+static int sdrsharp_set_mode(RIG *rig, vfo_t vfo, rmode_t mode, pbwidth_t width)
+{
+    int retval;
+    char cmd[MAXARGLEN];
+    char value[1024];
+    const char *mode_str;
+    struct sdrsharp_priv_data *priv = (struct sdrsharp_priv_data *) STATE(rig)->priv;
+
+    ENTERFUNC;
+    rig_debug(RIG_DEBUG_TRACE, "%s\n", __func__);
+    rig_debug(RIG_DEBUG_TRACE, "%s: vfo=%s mode=%llu width=%ld\n", __func__,
+              rig_strvfo(vfo), (long long unsigned int)mode, width);
+
+    if (check_vfo(vfo) == FALSE)
+    {
+        rig_debug(RIG_DEBUG_ERR, "%s: unsupported VFO %s\n",
+                  __func__, rig_strvfo(vfo));
+        RETURNFUNC2(-RIG_EINVAL);
+    }
+
+    if (vfo == RIG_VFO_CURR)
+    {
+        vfo = STATE(rig)->current_vfo;
+        rig_debug(RIG_DEBUG_TRACE, "%s: set_mode vfo=%s\n",
+                  __func__, rig_strvfo(vfo));
+    }
+
+    switch (mode)
+    {
+    case RIG_MODE_AM:
+        mode_str = "AM";
+        break;
+
+    case RIG_MODE_CW:
+        mode_str = "CW";
+        break;
+
+    case RIG_MODE_CWR:
+        mode_str = "CWR";
+        break;
+
+    case RIG_MODE_USB:
+        mode_str = "USB";
+        break;
+
+    case RIG_MODE_LSB:
+        mode_str = "LSB";
+        break;
+
+    case RIG_MODE_FM:
+        // narrow FM -> SDR# NFM
+        mode_str = "NFM";
+        break;
+
+    case RIG_MODE_WFM:
+        mode_str = "WFM";
+        break;
+
+    case RIG_MODE_DSB:
+        mode_str = "DSB";
+        break;
+
+    default:
+        rig_debug(RIG_DEBUG_ERR, "sdrsharp_set_mode: "
+                  "unsupported mode %s\n", rig_strrmode(mode));
+        RETURNFUNC2(-RIG_EINVAL);
+    }
+
+    if (width != RIG_PASSBAND_NOCHANGE && width > 0)
+    {
+        SNPRINTF(cmd, sizeof(cmd), "M %s %ld\n", mode_str, width);
+    }
+    else
+    {
+        SNPRINTF(cmd, sizeof(cmd), "M %s\n", mode_str);
+    }
+
+    retval = sdrsharp_transaction(rig, cmd, value, sizeof(value));
+
+    if (retval != RIG_OK)
+    {
+        RETURNFUNC2(retval);
+    }
+
+    sscanf(value, "RPRT %d", &retval);
+
+    if (retval == 0)
+    {
+        priv->curr_mode = mode;
+        if (width != RIG_PASSBAND_NOCHANGE)
+            priv->curr_width = width;
+    }
+
+    RETURNFUNC2(retval);
+}
+
+
+/*
+ * sdrsharp_get_mode
+ * Assumes rig!=NULL
+ */
+static int sdrsharp_get_mode(RIG *rig, vfo_t vfo, rmode_t *mode, pbwidth_t *width)
+{
+    int retval;
+    char value[MAXARGLEN];
+    char modeStr[MAXARGLEN];
+    int pbwidth = 0;
+    struct sdrsharp_priv_data *priv = (struct sdrsharp_priv_data *) STATE(rig)->priv;
+
+    ENTERFUNC;
+    rig_debug(RIG_DEBUG_TRACE, "%s: vfo=%s\n", __func__,
+              rig_strvfo(vfo));
+
+    if (check_vfo(vfo) == FALSE)
+    {
+        rig_debug(RIG_DEBUG_ERR, "%s: unsupported VFO %s\n",
+                  __func__, rig_strvfo(vfo));
+        RETURNFUNC(-RIG_EINVAL);
+    }
+
+    if (vfo == RIG_VFO_CURR)
+    {
+        vfo = STATE(rig)->current_vfo;
+        rig_debug(RIG_DEBUG_TRACE, "%s: get_mode vfo=%s\n",
+                  __func__, rig_strvfo(vfo));
+    }
+
+    char *cmd = "m\n";
+
+    retval = sdrsharp_transaction(rig, cmd, value, sizeof(value));
+
+    if (retval != RIG_OK)
+    {
+        rig_debug(RIG_DEBUG_ERR, "%s: get_mode failed retval=%s\n", __func__,
+                  rigerror(retval));
+        RETURNFUNC(retval);
+    }
+
+    // The response is two lines: mode\n passband\n
+    // e.g.: "USB\n2400\n"
+    // Some plugin versions may prepend "RPRT 0\n" — skip it if present
+    if (strncmp(value, "RPRT", 4) == 0)
+    {
+        rig_debug(RIG_DEBUG_TRACE, "%s: RPRT prefix detected, value='%s'\n", __func__, value);
+
+        // Read the next line(s) to get the actual mode data
+        retval = read_transaction(rig, value, sizeof(value));
+
+        if (retval != RIG_OK)
+        {
+            // If no further data, fall back to cached mode
+            rig_debug(RIG_DEBUG_WARN, "%s: read_transaction after RPRT failed retval=%s, "
+                      "falling back to cached mode=%s\n",
+                      __func__, rigerror(retval), rig_strrmode(priv->curr_mode));
+            *mode = priv->curr_mode;
+            if (width) { *width = priv->curr_width; }
+            RETURNFUNC(RIG_OK);
+        }
+
+        rig_debug(RIG_DEBUG_TRACE, "%s: after RPRT value='%s'\n", __func__, value);
+
+        // If the next value is also RPRT, the plugin doesn't support get_mode
+        if (strncmp(value, "RPRT", 4) == 0)
+        {
+            rig_debug(RIG_DEBUG_WARN, "%s: plugin returned RPRT again, "
+                      "get_mode not supported — using cached mode=%s\n",
+                      __func__, rig_strrmode(priv->curr_mode));
+            *mode = priv->curr_mode;
+            if (width) { *width = priv->curr_width; }
+            RETURNFUNC(RIG_OK);
+        }
+    }
+
+    sscanf(value, "%s\n%d", &modeStr[0], &pbwidth);
+
+    if (strcmp(&modeStr[0], "AM") == 0)
+    {
+        *mode = RIG_MODE_AM;
+    }
+    else if (strcmp(&modeStr[0], "CW") == 0)
+    {
+        *mode = RIG_MODE_CW;
+    }
+    else if (strcmp(&modeStr[0], "CWR") == 0)
+    {
+        *mode = RIG_MODE_CWR;
+    }
+    else if (strcmp(&modeStr[0], "USB") == 0)
+    {
+        *mode = RIG_MODE_USB;
+    }
+    else if (strcmp(&modeStr[0], "LSB") == 0)
+    {
+        *mode = RIG_MODE_LSB;
+    }
+    else if (strcmp(&modeStr[0], "NFM") == 0)
+    {
+        // narrow FM -> RIG_MODE_FM
+        *mode = RIG_MODE_FM;
+    }
+    else if (strcmp(&modeStr[0], "WFM") == 0)
+    {
+        *mode = RIG_MODE_WFM;
+    }
+    else if (strcmp(&modeStr[0], "DSB") == 0)
+    {
+        *mode = RIG_MODE_DSB;
+    }
+    else
+    {
+        rig_debug(RIG_DEBUG_ERR, "%s: unknown mode '%s'\n", __func__, &modeStr[0]);
+        RETURNFUNC(-RIG_EPROTO);
+    }
+
+    if (width) { *width = pbwidth; }
+
+    priv->curr_mode = *mode;
+    priv->curr_width = pbwidth;
+
+    RETURNFUNC(RIG_OK);
+}
+
+
 struct rig_caps sdrsharp_caps =
 {
     RIG_MODEL(RIG_MODEL_SDRSHARP),
@@ -572,5 +802,7 @@ struct rig_caps sdrsharp_caps =
     .get_vfo = sdrsharp_get_vfo, //always RIG_VFO_A
     .set_freq = sdrsharp_set_freq, //F <frequency Hz>\n
     .get_freq = sdrsharp_get_freq, //f\n
+    .set_mode = sdrsharp_set_mode, //M <mode> [passband]\n
+    .get_mode = sdrsharp_get_mode, //m\n
     .hamlib_check_rig_caps = HAMLIB_CHECK_RIG_CAPS
 };
