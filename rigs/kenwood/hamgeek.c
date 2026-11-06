@@ -167,6 +167,33 @@ static int hamgeek_usdx_set_vfo(RIG *rig, vfo_t vfo)
 }
 
 /*
+ * hamgeek_usdx_get_freq - FA; is unavailable while the uSDX is transmitting.
+ * The last known frequency is stable in TX, so serve it from Hamlib's cache.
+ */
+static int hamgeek_usdx_get_freq(RIG *rig, vfo_t vfo, freq_t *freq)
+{
+    struct kenwood_priv_data *priv = (struct kenwood_priv_data *)STATE(rig)->priv;
+    int cache_age;
+
+    if (!freq)
+    {
+        return -RIG_EINVAL;
+    }
+
+    if (priv->ptt_state_valid && priv->ptt_state != RIG_PTT_OFF
+            && (vfo == RIG_VFO_CURR || vfo == RIG_VFO_A))
+    {
+        if (rig_get_cache_freq(rig, RIG_VFO_A, freq, &cache_age) == RIG_OK
+                && *freq > 0 && cache_age >= 0)
+        {
+            return RIG_OK;
+        }
+    }
+
+    return kenwood_get_freq(rig, vfo, freq);
+}
+
+/*
  * hamgeek_usdx_get_vfo - return the only VFO without querying IF;
  * the firmware may reject IF while transmitting.
  */
@@ -359,7 +386,7 @@ struct rig_caps hamgeek_usdx_caps =
     .rig_cleanup =  kenwood_cleanup,
 
     .set_freq =     kenwood_set_freq,
-    .get_freq =     kenwood_get_freq,
+    .get_freq =     hamgeek_usdx_get_freq,
 
     .set_mode =     hamgeek_usdx_set_mode,
     .get_mode =     kenwood_get_mode,
