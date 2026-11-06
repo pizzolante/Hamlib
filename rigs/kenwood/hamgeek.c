@@ -183,8 +183,9 @@ static int hamgeek_usdx_get_freq(RIG *rig, vfo_t vfo, freq_t *freq)
     if (priv->ptt_state_valid && priv->ptt_state != RIG_PTT_OFF
             && (vfo == RIG_VFO_CURR || vfo == RIG_VFO_A))
     {
+        /* Hamlib uses 1000000 ms for cache entries that are unset or invalid. */
         if (rig_get_cache_freq(rig, RIG_VFO_A, freq, &cache_age) == RIG_OK
-                && *freq > 0 && cache_age >= 0)
+            && *freq > 0 && cache_age < 1000000)
         {
             return RIG_OK;
         }
@@ -214,11 +215,11 @@ static int hamgeek_usdx_get_vfo(RIG *rig, vfo_t *vfo)
  * hamgeek_usdx_set_ptt - set_ptt wrapper
  *
  * PTT ON:  TX; / TX0; / TX1; — firmware sends no serial reply.
- * PTT OFF: RX;               — some firmware versions reply with "RX0;".
+ * PTT OFF: RX; RX;           — some firmware versions reply with "RX0;".
  *
  * The generic Kenwood transaction code does not read RX replies; it flushes
- * pending input before the next command. Repeated identical requests are
- * suppressed because this firmware cannot report PTT state reliably.
+ * pending input before the next command. Duplicate key-up requests are
+ * suppressed; key-down commands are always sent to ensure release.
  */
 static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
 {
@@ -252,7 +253,7 @@ static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
     }
 
     /* Suppress duplicate key-up commands, but always issue a fresh RX. */
-        if (ptt != RIG_PTT_OFF && priv->ptt_state_valid
+    if (ptt != RIG_PTT_OFF && priv->ptt_state_valid
             && priv->ptt_state == ptt)
     {
         return RIG_OK;
@@ -274,8 +275,8 @@ static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
  *
  * TQ; is not supported by the uSDX firmware (returns '?;').  The IF; field
  * at position [29] carries the mode, not TX state; the TX status byte is
- * always '0' regardless of PTT.  Return RIG_PTT_OFF unconditionally to avoid
- * protocol errors.
+ * always '0' regardless of PTT.  Report the last state requested through
+ * Hamlib instead.
  */
 static int hamgeek_usdx_get_ptt(RIG *rig, vfo_t vfo, ptt_t *ptt)
 {
