@@ -204,7 +204,8 @@ static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
     switch (ptt)
     {
     case RIG_PTT_OFF:
-        cmd = "RX";
+        /* Repeat state-setting RX; PTT readback is unavailable. */
+        cmd = "RX;RX";
         break;
 
     case RIG_PTT_ON:
@@ -223,8 +224,9 @@ static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
         return -RIG_EINVAL;
     }
 
-    /* Avoid retransmitting a PTT state that is already active. */
-    if (priv->ptt_state_valid && priv->ptt_state == ptt)
+    /* Suppress duplicate key-up commands, but always issue a fresh RX. */
+        if (ptt != RIG_PTT_OFF && priv->ptt_state_valid
+            && priv->ptt_state == ptt)
     {
         return RIG_OK;
     }
