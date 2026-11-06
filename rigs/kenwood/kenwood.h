@@ -190,6 +190,8 @@ struct kenwood_priv_data
     const char *voice_mem_start, *voice_mem_stop; // Commands to do the thing to do
     rmode_t last_mode_pc; // last mode memory for PC command
     int power_now,power_min,power_max;
+    ptt_t ptt_state;  /* last PTT state requested by rigs without PTT readback */
+    int ptt_state_valid;
 };
 
 

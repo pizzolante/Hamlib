@@ -68,7 +68,7 @@
 /* Only VFO A is present on uSDX hardware (FB; returns '?;') */
 #define USDX_VFO       RIG_VFO_A
 
-#define USDX_BACKEND_VER "20260423"
+#define USDX_BACKEND_VER "20261106"
 
 /*
  * Minimal TS-480 subset: no slope filters, no special filter width table.
@@ -105,6 +105,7 @@ static int hamgeek_usdx_open(RIG *rig)
 
     priv = (struct kenwood_priv_data *)STATE(rig)->priv;
     priv->no_id = 1;    /* ID; not implemented in uSDX firmware */
+    priv->ptt_state_valid = 0;
 
     return RIG_OK;
 }
@@ -166,33 +167,74 @@ static int hamgeek_usdx_set_vfo(RIG *rig, vfo_t vfo)
 }
 
 /*
+ * hamgeek_usdx_get_vfo - return the only VFO without querying IF;
+ * the firmware may reject IF while transmitting.
+ */
+static int hamgeek_usdx_get_vfo(RIG *rig, vfo_t *vfo)
+{
+    rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
+
+    if (!vfo)
+    {
+        return -RIG_EINVAL;
+    }
+
+    *vfo = RIG_VFO_A;
+    return RIG_OK;
+}
+
+/*
  * hamgeek_usdx_set_ptt - set_ptt wrapper
  *
- * PTT ON:  TX; / TX0; / TX1; — firmware sends NO serial reply.
- * PTT OFF: RX;               — firmware replies with "RX0;".
+ * PTT ON:  TX; / TX0; / TX1; — firmware sends no serial reply.
+ * PTT OFF: RX;               — some firmware versions reply with "RX0;".
  *
- * kenwood_set_ptt calls kenwood_transaction with datasize=0 (no reply read).
- * For PTT OFF the stray "RX0;" would accumulate in the serial buffer and
- * corrupt the next response, so we read it explicitly here.
+ * The generic Kenwood transaction code does not read RX replies; it flushes
+ * pending input before the next command. Repeated identical requests are
+ * suppressed because this firmware cannot report PTT state reliably.
  */
 static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
 {
-    char buf[8];
+    struct kenwood_priv_data *priv = (struct kenwood_priv_data *)STATE(rig)->priv;
+    const char *cmd;
     int retval;
 
     rig_debug(RIG_DEBUG_VERBOSE, "%s called ptt=%d\n", __func__, ptt);
 
-    if (ptt == RIG_PTT_OFF)
+    switch (ptt)
     {
-        /* RX; — firmware replies "RX0;" — read and discard to keep buffer clean */
-        retval = kenwood_transaction(rig, "RX", buf, sizeof(buf));
+    case RIG_PTT_OFF:
+        cmd = "RX";
+        break;
+
+    case RIG_PTT_ON:
+        cmd = "TX";
+        break;
+
+    case RIG_PTT_ON_MIC:
+        cmd = "TX0";
+        break;
+
+    case RIG_PTT_ON_DATA:
+        cmd = "TX1";
+        break;
+
+    default:
+        return -RIG_EINVAL;
     }
-    else
+
+    /* Avoid retransmitting a PTT state that is already active. */
+    if (priv->ptt_state_valid && priv->ptt_state == ptt)
     {
-        /* TX / TX0 (mic) / TX1 (data) — no reply from firmware */
-        const char *cmd = (ptt == RIG_PTT_ON_MIC)  ? "TX0" :
-                          (ptt == RIG_PTT_ON_DATA) ? "TX1" : "TX";
-        retval = kenwood_transaction(rig, cmd, NULL, 0);
+        return RIG_OK;
+    }
+
+    retval = kenwood_transaction(rig, cmd, NULL, 0);
+
+    if (retval == RIG_OK)
+    {
+        priv->ptt_state = ptt;
+        priv->ptt_state_valid = 1;
     }
 
     return retval;
@@ -208,9 +250,18 @@ static int hamgeek_usdx_set_ptt(RIG *rig, vfo_t vfo, ptt_t ptt)
  */
 static int hamgeek_usdx_get_ptt(RIG *rig, vfo_t vfo, ptt_t *ptt)
 {
+    struct kenwood_priv_data *priv = (struct kenwood_priv_data *)STATE(rig)->priv;
+
     rig_debug(RIG_DEBUG_VERBOSE, "%s called\n", __func__);
 
-    *ptt = RIG_PTT_OFF;  /* TQ; not supported by uSDX firmware */
+    if (!ptt)
+    {
+        return -RIG_EINVAL;
+    }
+
+    /* TQ; is unavailable; report the last state commanded through Hamlib. */
+    *ptt = priv->ptt_state_valid && priv->ptt_state != RIG_PTT_OFF ?
+           RIG_PTT_ON : RIG_PTT_OFF;
     return RIG_OK;
 }
 
@@ -312,7 +363,7 @@ struct rig_caps hamgeek_usdx_caps =
     .get_mode =     kenwood_get_mode,
 
     .set_vfo =      hamgeek_usdx_set_vfo,
-    .get_vfo =      kenwood_get_vfo_if,
+    .get_vfo =      hamgeek_usdx_get_vfo,
 
     .set_ptt =      hamgeek_usdx_set_ptt,
     .get_ptt =      hamgeek_usdx_get_ptt,

@@ -1,0 +1,179 @@
+name: Build Windows x64
+
+on:
+  push:
+    branches: [ airspy-test, hamgeek-test ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-w64:
+    runs-on: ubuntu-latest
+    env:
+      HAMLIB_VERSION: "4.7.3~git"           # sovrascrive AC_INIT; ABI_VERSION ricavato automaticamente dal major
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            mingw-w64 \
+            zip \
+            tofrodos \
+            groff \
+            autoconf \
+            automake \
+            libtool \
+            pkg-config
+
+      - name: Override Hamlib version in configure.ac
+        if: ${{ env.HAMLIB_VERSION != '' }}
+        run: |
+          sed -i "s/^AC_INIT(\[Hamlib\],\[[^]]*\]/AC_INIT([Hamlib],[${HAMLIB_VERSION}]/" configure.ac
+          HAMLIB_ABI_VERSION=$(echo "${HAMLIB_VERSION}" | sed -n 's/^\([0-9][0-9]*\)\..*/\1/p')
+          if [ -n "${HAMLIB_ABI_VERSION}" ]; then
+            sed -i "s/^ABI_VERSION=.*/ABI_VERSION=${HAMLIB_ABI_VERSION}/" configure.ac
+          fi
+          echo "configure.ac dopo override (AC_INIT + ABI_VERSION):"
+          grep -E '^(AC_INIT|ABI_VERSION=)' configure.ac
+
+      - name: Bootstrap
+        run: ./bootstrap
+
+      - name: Configure for Windows x64
+        run: |
+          HOST_ARCH=x86_64-w64-mingw32
+
+          ./configure \
+            --host=${HOST_ARCH} \
+            --build=$(gcc -dumpmachine) \
+            --target=${HOST_ARCH} \
+            --prefix="${GITHUB_WORKSPACE}/mingw64-inst" \
+            --without-cxx-binding \
+            --without-libusb \
+            --disable-static \
+            --enable-shared
+
+      - name: Build and install
+        run: |
+          make -j$(nproc) --no-print-directory install
+          # Strip binaries
+          x86_64-w64-mingw32-strip mingw64-inst/bin/*.exe mingw64-inst/bin/*.dll 2>/dev/null || true
+
+      - name: Get Hamlib version
+        id: version
+        run: |
+          if [ -n "${HAMLIB_VERSION}" ]; then
+            RELEASE="${HAMLIB_VERSION}"
+          else
+            RELEASE=$(sed -n 's/^AC_INIT.*\[\([0-9][^]]*\)\].*/\1/p' configure.ac)
+          fi
+          echo "release=${RELEASE}" >> $GITHUB_OUTPUT
+          echo "Release: ${RELEASE}"
+
+      - name: Create distribution package
+        run: |
+          RELEASE="${{ steps.version.outputs.release }}"
+          HL_FILENAME="hamlib-w64-${RELEASE}"
+          ZIP_DIR="${GITHUB_WORKSPACE}/${HL_FILENAME}"
+          INST_DIR="${GITHUB_WORKSPACE}/mingw64-inst"
+
+          mkdir -p ${ZIP_DIR}/bin ${ZIP_DIR}/lib/msvc ${ZIP_DIR}/lib/gcc ${ZIP_DIR}/include ${ZIP_DIR}/doc
+
+          # Copy def file
+          cp -a src/libhamlib.def ${ZIP_DIR}/lib/msvc/libhamlib-4.def 2>/dev/null || true
+          if [ -f "${ZIP_DIR}/lib/msvc/libhamlib-4.def" ]; then
+            todos ${ZIP_DIR}/lib/msvc/libhamlib-4.def
+          fi
+
+          # Copy headers
+          cp -a ${INST_DIR}/include/hamlib ${ZIP_DIR}/include/.
+          todos ${ZIP_DIR}/include/hamlib/*.h 2>/dev/null || true
+
+          # Remove C++ class headers (ABI incompatible)
+          rm -f ${ZIP_DIR}/include/hamlib/*class.h
+
+          # Copy documentation files as .txt
+          for f in AUTHORS ChangeLog COPYING COPYING.LIB LICENSE README.md README.betatester THANKS; do
+            if [ -f "$f" ]; then
+              cp -a "$f" "${ZIP_DIR}/${f}.txt"
+              todos "${ZIP_DIR}/${f}.txt"
+            fi
+          done
+
+          # Generate HTML from man pages
+          if ls doc/man1/*.1 1>/dev/null 2>&1; then
+            for f in doc/man1/*.1 doc/man7/*.7; do
+              if [ -f "$f" ]; then
+                groff -mandoc -Thtml "$f" > "${f}.html" 2>/dev/null || true
+                cp -a "${f}.html" ${ZIP_DIR}/doc/. 2>/dev/null || true
+              fi
+            done
+          fi
+
+          # Copy EXEs and DLLs
+          cp -a ${INST_DIR}/bin/*.exe ${ZIP_DIR}/bin/. 2>/dev/null || true
+          cp -a ${INST_DIR}/bin/libhamlib-?.dll ${ZIP_DIR}/bin/. 2>/dev/null || true
+          cp -a ${INST_DIR}/lib/libhamlib.dll.a ${ZIP_DIR}/lib/gcc/. 2>/dev/null || true
+
+          # Copy required mingw runtime DLLs
+          MINGW_LIBDIR="/usr/x86_64-w64-mingw32/lib"
+          if [ -f "${MINGW_LIBDIR}/libwinpthread-1.dll" ]; then
+            cp -a "${MINGW_LIBDIR}/libwinpthread-1.dll" ${ZIP_DIR}/bin/.
+          fi
+
+          # Copy libgcc DLL (search common GCC versions)
+          for gcc_ver in 14 13 12 10; do
+            GCC_DLL="/usr/lib/gcc/x86_64-w64-mingw32/${gcc_ver}-posix/libgcc_s_seh-1.dll"
+            if [ -f "$GCC_DLL" ]; then
+              cp -a "$GCC_DLL" ${ZIP_DIR}/bin/.
+              break
+            fi
+          done
+
+          # Generate GCC .lib from .def
+          if command -v x86_64-w64-mingw32-dlltool &> /dev/null; then
+            if [ -f "${ZIP_DIR}/lib/msvc/libhamlib-4.def" ]; then
+              x86_64-w64-mingw32-dlltool \
+                --input-def ${ZIP_DIR}/lib/msvc/libhamlib-4.def \
+                --output-lib ${ZIP_DIR}/lib/gcc/libhamlib-4.lib 2>/dev/null || true
+            fi
+          fi
+
+          # Create the ZIP archive
+          cd ${GITHUB_WORKSPACE}
+          zip -r ${HL_FILENAME}.zip $(basename ${ZIP_DIR})
+
+          echo "zip_file=${HL_FILENAME}.zip" >> $GITHUB_OUTPUT
+          echo "ZIP created: ${HL_FILENAME}.zip"
+        id: package
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hamlib-w64-${{ steps.version.outputs.release }}
+          path: ${{ steps.package.outputs.zip_file }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}-${{ github.run_number }}
+          name: "Hamlib Windows x64 - Build #${{ github.run_number }} (${{ steps.version.outputs.release }})"
+          body: |
+            ## Hamlib Windows x64 Build
+
+            - **Branch:** `${{ github.ref_name }}`
+            - **Commit:** ${{ github.sha }}
+            - **Version:** ${{ steps.version.outputs.release }}
+
+            Cross-compiled with MinGW-w64 on Ubuntu.
+          files: ${{ steps.package.outputs.zip_file }}
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -420,8 +420,12 @@ transaction_write:
         }
     }
 
-    // Malachite SDR cannot send ID after FA
-    if (!datasize && priv->no_id) { RETURNFUNC2(RIG_OK); }
+    // Some rigs cannot send ID after set commands
+    if (!datasize && priv->no_id)
+    {
+        retval = RIG_OK;
+        goto transaction_quit;
+    }
 
     if (!datasize && strncmp(cmdstr, "KY", 2) != 0)
     {
